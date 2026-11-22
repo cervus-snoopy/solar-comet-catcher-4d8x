@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Star Catcher — Neon Arcade</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #050510; font-family: "Segoe UI", Arial, sans-serif; overflow: hidden; }
+  #wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 10px; }
+  h1 { color: #0ff; text-shadow: 0 0 10px #0ff, 0 0 30px #0ff; font-size: 34px; letter-spacing: 4px; text-transform: uppercase; }
+  #hud { display: flex; gap: 28px; color: #fff; font-size: 20px; font-weight: bold; text-shadow: 0 0 8px #f0f; }
+  #hud span { min-width: 90px; text-align: center; }
+  #hud .lbl { color: #888; font-size: 13px; display: block; letter-spacing: 2px; }
+  #score { color: #0ff; } #lives { color: #ff2d78; } #time { color: #ffe600; }
+  canvas { background: radial-gradient(ellipse at center, #0a0a2e 0%, #050510 70%); border: 2px solid #0ff; border-radius: 10px;
+    box-shadow: 0 0 25px rgba(0,255,255,.45), inset 0 0 40px rgba(0,255,255,.08); cursor: none; touch-action: none; }
+  #hint { color: #666; font-size: 14px; }
+  #gameArea { position: relative; }
+  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px; background: rgba(5,5,16,.82); color: #fff; text-align: center; z-index: 10; }
+  #overlay.hidden { display: none; }
+  #overlay h2 { font-size: 44px; color: #ffe600; text-shadow: 0 0 15px #ffe600, 0 0 45px #ff8800; letter-spacing: 3px; }
+  #overlay p { font-size: 20px; color: #ccc; }
+  #overlay p b { color: #0ff; font-size: 28px; }
+  #restart { padding: 14px 42px; font-size: 20px; font-weight: bold; letter-spacing: 2px; color: #050510; background: #0ff;
+    border: none; border-radius: 40px; cursor: pointer; box-shadow: 0 0 20px #0ff; transition: transform .1s, box-shadow .1s; }
+  #restart:hover { transform: scale(1.06); box-shadow: 0 0 32px #0ff; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>&#9733; Star Catcher &#9733;</h1>
+  <div id="hud">
+    <span><span class="lbl">SCORE</span><span id="score">0</span></span>
+    <span><span class="lbl">LIVES</span><span id="lives">&#10084;&#10084;&#10084;</span></span>
+    <span><span class="lbl">TIME</span><span id="time">60</span></span>
+  </div>
+  <div id="gameArea">
+    <canvas id="game" width="480" height="560"></canvas>
+    <div id="overlay" class="hidden">
+      <h2 id="overTitle">GAME OVER</h2>
+      <p>Final score: <b id="finalScore">0</b></p>
+      <p id="overMsg"></p>
+      <button id="restart">PLAY AGAIN</button>
+    </div>
+  </div>
+  <div id="hint">Move: &larr; &rarr; arrow keys, A / D, or mouse &nbsp;|&nbsp; &#9733; star = 10 pts &nbsp;|&nbsp; &#9733; golden star = 50 pts &nbsp;|&nbsp; Miss = lose a life</div>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  // ---- DOM & canvas ----
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+
+  var scoreEl = document.getElementById("score");
+  var livesEl = document.getElementById("lives");
+  var timeEl = document.getElementById("time");
+  var overlay = document.getElementById("overlay");
+  var overTitle = document.getElementById("overTitle");
+  var finalScoreEl = document.getElementById("finalScore");
+  var overMsg = document.getElementById("overMsg");
+  var restartBtn = document.getElementById("restart");
+
+  // ---- Constants ----
+  var BASKET_W = 90, BASKET_H = 16, BASKET_Y = H - 34;
+  var GAME_TIME = 60, START_LIVES = 3, GOLDEN_CHANCE = 0.15;
+  var NORMAL_POINTS = 10, GOLDEN_POINTS = 50;
+
+  // ---- State ----
+  var state = "playing";
+  var basket = { x: W / 2 - BASKET_W / 2 };
+  var stars = [], particles = [], field = [];
+  var score = 0, lives = START_LIVES, timeLeft = GAME_TIME;
+  var spawnTimer = 0, elapsed = 0, lastTime = performance.now();
+  var keys = {};
+
+  // Pre-computed starfield so the background does not flicker every frame.
+  for (var i = 0; i < 48; i++) {
+    field.push({ x: Math.random() * W, y: Math.random() * H, s: Math.random() < 0.8 ? 2 : 3,
+      a: 0.15 + Math.random() * 0.35, tw: Math.random() * Math.PI * 2 });
+  }
+
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+  // ---- Input ----
+  window.addEventListener("keydown", function (e) {
+    keys[e.key] = true;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === " ") e.preventDefault();
+    if (state === "over" && (e.key === "Enter" || e.key === " ")) resetGame();
+  });
+  window.addEventListener("keyup", function (e) { keys[e.key] = false; });
+
+  function moveBasketTo(clientX) {
+    var rect = canvas.getBoundingClientRect();
+    basket.x = clamp((clientX - rect.left) * (W / rect.width) - BASKET_W / 2, 0, W - BASKET_W);
+  }
+  canvas.addEventListener("mousemove", function (e) { moveBasketTo(e.clientX); });
+  canvas.addEventListener("touchmove", function (e) {
+    e.preventDefault();
+    if (e.touches.length) moveBasketTo(e.touches[0].clientX);
+  }, { passive: false });
+  restartBtn.addEventListener("click", resetGame);
+
+  // ---- Game flow ----
+  function resetGame() {
+    score = 0; lives = START_LIVES; timeLeft = GAME_TIME;
+    stars = []; particles = [];
+    basket.x = W / 2 - BASKET_W / 2;
+    spawnTimer = 0; elapsed = 0;
+    overlay.classList.add("hidden");
+    state = "playing";
+    lastTime = performance.now();
+    updateHud();
+  }
+
+  function updateHud() {
+    scoreEl.textContent = score;
+    livesEl.textContent = lives > 0 ? "\u2764".repeat(lives) : "\u2014";
+    timeEl.textContent = Math.max(Math.ceil(timeLeft), 0);
+  }
+
+  function spawnStar() {
+    var golden = Math.random() < GOLDEN_CHANCE;
+    stars.push({
+      x: rand(20, W - 20), y: -20,
+      r: golden ? 13 : rand(8, 12),
+      vy: rand(140, 220) + elapsed * 1.6,   // falls faster as the round goes on
+      vx: rand(-25, 25),
+      golden: golden,
+      rot: rand(0, Math.PI * 2), rotSpeed: rand(-2, 2),
+      twinkle: rand(0, Math.PI * 2)
+    });
+  }
+
+  function burst(x, y, color, n) {
+    for (var i = 0; i < n; i++) {
+      var a = rand(0, Math.PI * 2), sp = rand(40, 180);
+      particles.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: 0.5, maxLife: 0.5, color: color, r: rand(2, 4) });
+    }
+  }
+
+  function gameOver(win) {
+    state = "over";
+    overTitle.textContent = win ? "TIME'S UP!" : "GAME OVER";
+    finalScoreEl.textContent = score;
+    overMsg.textContent = win
+      ? "You survived the full 60 seconds!"
+      : "Out of lives \u2014 the stars got away...";
+    overlay.classList.remove("hidden");
+  }
+
+  // ---- Update ----
+  function update(dt) {
+    elapsed += dt;
+    timeLeft -= dt;
+    if (timeLeft <= 0) { timeLeft = 0; updateHud(); gameOver(true); return; }
+    if (Math.ceil(timeLeft) !== Math.ceil(timeLeft + dt)) updateHud();
+
+    var speed = 420;
+    if (keys["ArrowLeft"] || keys["a"] || keys["A"]) basket.x -= speed * dt;
+    if (keys["ArrowRight"] || keys["d"] || keys["D"]) basket.x += speed * dt;
+    basket.x = clamp(basket.x, 0, W - BASKET_W);
+
+    spawnTimer += dt * 1000;
+    var interval = Math.max(650 - elapsed * 6, 260); // spawns speed up over time
+    if (spawnTimer >= interval) { spawnTimer = 0; spawnStar(); }
+
+    for (var i = stars.length - 1; i >= 0; i--) {
+      var s = stars[i];
+      s.y += s.vy * dt; s.x += s.vx * dt;
+      // Bounce off the side walls so a star can never drift out of reach.
+      if (s.x < s.r) { s.x = s.r; s.vx = Math.abs(s.vx); }
+      if (s.x > W - s.r) { s.x = W - s.r; s.vx = -Math.abs(s.vx); }
+      s.rot += s.rotSpeed * dt; s.twinkle += dt * 6;
+      var caught = s.y + s.r >= BASKET_Y && s.y <= BASKET_Y + BASKET_H + 10 &&
+        s.x >= basket.x - 4 && s.x <= basket.x + BASKET_W + 4;
+      if (caught) {
+        score += s.golden ? GOLDEN_POINTS : NORMAL_POINTS;
+        burst(s.x, s.y, s.golden ? "#ffe600" : "#0ff", s.golden ? 18 : 10);
+        stars.splice(i, 1);
+        updateHud();
+        continue;
+      }
+      if (s.y - s.r > H) {
+        stars.splice(i, 1);
+        lives -= 1;
+        burst(s.x, H - 10, "#ff2d78", 12);
+        updateHud();
+        if (lives <= 0) { gameOver(false); return; }
+      }
+    }
+
+    for (var j = particles.length - 1; j >= 0; j--) {
+      var p = particles[j];
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 120 * dt; p.life -= dt;
+      if (p.life <= 0) particles.splice(j, 1);
+    }
+  }
+
+  // ---- Render ----
+  function drawStar(x, y, r, rot, color, glow) {
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(rot);
+    ctx.shadowColor = glow; ctx.shadowBlur = 16; ctx.fillStyle = color;
+    ctx.beginPath();
+    for (var i = 0; i < 10; i++) {
+      var rad = (i % 2 === 0) ? r : r * 0.45;
+      var a = (i * Math.PI) / 5 - Math.PI / 2;
+      var px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBasket() {
+    var x = basket.x, y = BASKET_Y;
+    ctx.save();
+    ctx.shadowColor = "#0ff"; ctx.shadowBlur = 18;
+    var grad = ctx.createLinearGradient(x, y, x, y + BASKET_H + 14);
+    grad.addColorStop(0, "#00e5ff"); grad.addColorStop(1, "#0077ff");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(x, y); ctx.lineTo(x + BASKET_W, y);
+    ctx.lineTo(x + BASKET_W - 10, y + BASKET_H + 8);
+    ctx.lineTo(x + 10, y + BASKET_H + 8);
+    ctx.closePath(); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x + BASKET_W / 3, y + 2); ctx.lineTo(x + BASKET_W / 3 - 4, y + BASKET_H + 6);
+    ctx.moveTo(x + 2 * BASKET_W / 3, y + 2); ctx.lineTo(x + 2 * BASKET_W / 3 + 4, y + BASKET_H + 6);
+    ctx.stroke();
+    ctx.fillStyle = "#bffcff";
+    ctx.fillRect(x - 2, y - 3, BASKET_W + 4, 5);
+    ctx.restore();
+  }
+
+  function render(now) {
+    ctx.clearRect(0, 0, W, H);
+    for (var i = 0; i < field.length; i++) {
+      var f = field[i];
+      ctx.globalAlpha = f.a * (0.7 + 0.3 * Math.sin(now / 700 + f.tw));
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(f.x, f.y, f.s, f.s);
+    }
+    ctx.globalAlpha = 1;
+    for (var k = 0; k < stars.length; k++) {
+      var s = stars[k];
+      ctx.globalAlpha = 0.7 + 0.3 * Math.sin(s.twinkle);
+      drawStar(s.x, s.y, s.r, s.rot, s.golden ? "#ffe600" : "#7df9ff",
+        s.golden ? "#ff8800" : "#00e5ff");
+    }
+    ctx.globalAlpha = 1;
+    for (var j = 0; j < particles.length; j++) {
+      var p = particles[j];
+      ctx.globalAlpha = Math.max(p.life / p.maxLife, 0);
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    drawBasket();
+    // Time bar along the top of the canvas.
+    ctx.fillStyle = "rgba(255,255,255,.15)";
+    ctx.fillRect(10, 10, W - 20, 6);
+    ctx.fillStyle = timeLeft > 10 ? "#0ff" : "#ff2d78";
+    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8;
+    ctx.fillRect(10, 10, (W - 20) * (timeLeft / GAME_TIME), 6);
+    ctx.shadowBlur = 0;
+  }
+
+  function loop(now) {
+    var dt = Math.min((now - lastTime) / 1000, 0.05);
+    lastTime = now;
+    if (state === "playing") update(dt);
+    render(now);
+    requestAnimationFrame(loop);
+  }
+
+  updateHud();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
